@@ -10,10 +10,13 @@
             overflow: hidden;
             font-family: 'Courier New', Courier, monospace;
             user-select: none;
+            touch-action: none;
+            overscroll-behavior: none;
         }
         #canvas-container {
             width: 100vw;
             height: 100vh;
+            touch-action: none;
         }
         #ui {
             position: absolute;
@@ -65,6 +68,22 @@
             box-shadow: 10px 10px 0px #000;
             z-index: 10;
             cursor: pointer;
+            max-width: 90vw;
+        }
+        #instructions button {
+            margin-top: 16px;
+            padding: 10px 18px;
+            border: 3px solid #fff;
+            background: #111;
+            color: #fff;
+            font-family: 'Courier New', Courier, monospace;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 4px 4px 0px #666;
+        }
+        #instructions button:hover {
+            background: #ffcc00;
+            color: #000;
         }
         #crosshair {
             position: absolute;
@@ -78,6 +97,62 @@
             text-shadow: 2px 2px 0px #000;
             z-index: 5;
             pointer-events: none;
+        }
+        .mobile-controls {
+            position: absolute;
+            bottom: 18px;
+            left: 0;
+            right: 0;
+            display: none;
+            justify-content: space-between;
+            align-items: flex-end;
+            padding: 0 16px 0 16px;
+            z-index: 12;
+            pointer-events: none;
+        }
+        .control-pad {
+            display: grid;
+            grid-template-columns: repeat(3, 48px);
+            gap: 8px;
+            pointer-events: auto;
+        }
+        .control-btn, .action-btn {
+            width: 48px;
+            height: 48px;
+            border: 3px solid #fff;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            font-size: 1rem;
+            font-weight: bold;
+            font-family: 'Courier New', Courier, monospace;
+            box-shadow: 4px 4px 0 #000;
+            touch-action: none;
+        }
+        .control-btn:active, .action-btn:active {
+            transform: translate(2px, 2px);
+            box-shadow: 2px 2px 0 #000;
+        }
+        .control-btn[data-dir="up"] { grid-column: 2; }
+        .control-btn[data-dir="left"] { grid-column: 1; grid-row: 2; }
+        .control-btn[data-dir="down"] { grid-column: 2; grid-row: 2; }
+        .control-btn[data-dir="right"] { grid-column: 3; grid-row: 2; }
+        .action-btn {
+            width: 70px;
+            height: 70px;
+            border-radius: 50%;
+            font-size: 0.9rem;
+        }
+        .mobile-hint {
+            color: white;
+            text-shadow: 2px 2px 0 #000;
+            font-size: 0.9rem;
+            margin-bottom: 8px;
+            pointer-events: none;
+        }
+        @media (min-width: 768px) {
+            .mobile-controls {
+                display: none !important;
+            }
         }
         .screen-overlay {
             display: none;
@@ -122,10 +197,27 @@
 
     <div id="instructions">
         <h1>SURVIVE & SEARCH 3D</h1>
-        <p>Click anywhere to look around and start.</p>
-        <p><strong>WASD</strong> to Move | <strong>Mouse</strong> to Look</p>
+        <p>Start the game to lock the mouse and begin exploring.</p>
+        <p><strong>WASD</strong> to Move | <strong>Mouse</strong> to Look | <strong>E</strong> to Open Chests</p>
         <p>Find the hidden 3D chests. One contains a <strong>Nuke</strong>.</p>
         <p style="color: #ff6666; font-weight: bold;">Run from 3D Bobby.</p>
+        <button id="start-button" type="button">Start Game</button>
+    </div>
+
+    <div id="mobile-controls" class="mobile-controls">
+        <div>
+            <div class="mobile-hint">Move</div>
+            <div class="control-pad">
+                <button class="control-btn" data-dir="up" aria-label="Move forward">W</button>
+                <button class="control-btn" data-dir="left" aria-label="Move left">A</button>
+                <button class="control-btn" data-dir="down" aria-label="Move backward">S</button>
+                <button class="control-btn" data-dir="right" aria-label="Move right">D</button>
+            </div>
+        </div>
+        <div style="display:flex; flex-direction:column; align-items:flex-end; gap:8px;">
+            <div class="mobile-hint">Look &amp; Interact</div>
+            <button class="action-btn" data-action="interact" aria-label="Interact">E</button>
+        </div>
     </div>
 
     <div id="ui">
@@ -170,7 +262,19 @@
 
         let ambientLight, hemiLight, flashlight;
         let chests = [];
+        let treeObjects = [];
         let activeChest = null; 
+        let isStarted = false;
+        let audioContext = null;
+        const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent) || window.matchMedia('(pointer: coarse)').matches;
+        let touchLookActive = false;
+        let touchStartX = 0;
+        let touchStartY = 0;
+        let lastTouchX = 0;
+        let lastTouchY = 0;
+        let masterGain = null;
+        let lastFootstepTime = 0;
+        let lastBobbySoundTime = 0;
 
         // Monster (Bobby) variables
         let bobby;
@@ -181,6 +285,7 @@
         const cameraRotation = { x: 0, y: 0 };
         const instructions = document.getElementById('instructions');
         const canvasContainer = document.getElementById('canvas-container');
+        const mobileControls = document.getElementById('mobile-controls');
         const promptUI = document.getElementById('interaction-prompt');
         const alertUI = document.getElementById('chest-alert');
         const flashOverlay = document.getElementById('flash-overlay');
@@ -223,13 +328,36 @@
             // Event Listeners
             document.addEventListener('keydown', onKeyDown);
             document.addEventListener('keyup', onKeyUp);
-            instructions.addEventListener('click', () => canvasContainer.requestPointerLock());
+            setupMobileControls();
+            canvasContainer.addEventListener('touchstart', onTouchStart, { passive: false });
+            canvasContainer.addEventListener('touchmove', onTouchMove, { passive: false });
+            canvasContainer.addEventListener('touchend', onTouchEnd);
+            canvasContainer.addEventListener('touchcancel', onTouchEnd);
+            instructions.addEventListener('click', (event) => {
+                event.stopPropagation();
+                startGame();
+            });
+            document.getElementById('start-button').addEventListener('click', (event) => {
+                event.stopPropagation();
+                startGame();
+            });
+            document.addEventListener('click', () => {
+                if (!isStarted && !isGameOver && !isNuking) {
+                    startGame();
+                }
+            });
+            document.addEventListener('keydown', (event) => {
+                if (!isStarted && !isGameOver && !isNuking && (event.code === 'Enter' || event.code === 'Space')) {
+                    event.preventDefault();
+                    startGame();
+                }
+            });
 
             document.addEventListener('pointerlockchange', () => {
                 if (document.pointerLockElement === canvasContainer) {
                     instructions.style.display = 'none';
-                } else {
-                    if(!isGameOver && !isNuking) instructions.style.display = 'block';
+                } else if (!isGameOver && !isNuking && !isMobile) {
+                    instructions.style.display = 'block';
                 }
             });
 
@@ -269,6 +397,8 @@
                 if (Math.sqrt(x*x + z*z) < 15) continue; 
 
                 tree.position.set(x, 0, z);
+                tree.userData.radius = 2.6;
+                treeObjects.push(tree);
                 scene.add(tree);
             }
         }
@@ -400,6 +530,158 @@
             bobby.add(bobbyName3D);
         }
 
+        function ensureAudio() {
+            if (audioContext) return audioContext;
+            const AudioCtx = window.AudioContext || window.webkitAudioContext;
+            if (!AudioCtx) return null;
+
+            audioContext = new AudioCtx();
+            masterGain = audioContext.createGain();
+            masterGain.gain.value = 0.08;
+            masterGain.connect(audioContext.destination);
+            return audioContext;
+        }
+
+        function playTone(freq, duration, type = 'sine', volume = 0.04, delay = 0) {
+            const ctx = ensureAudio();
+            if (!ctx) return;
+
+            const now = ctx.currentTime + delay;
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = type;
+            osc.frequency.setValueAtTime(freq, now);
+            gain.gain.setValueAtTime(0.0001, now);
+            gain.gain.exponentialRampToValueAtTime(volume, now + 0.01);
+            gain.gain.exponentialRampToValueAtTime(0.0001, now + duration);
+            osc.connect(gain);
+            gain.connect(masterGain);
+            osc.start(now);
+            osc.stop(now + duration + 0.05);
+        }
+
+        function playFootstep() {
+            const now = performance.now();
+            if (now - lastFootstepTime < 240) return;
+            lastFootstepTime = now;
+            playTone(180 + Math.random() * 40, 0.08, 'triangle', 0.012);
+            playTone(90 + Math.random() * 20, 0.08, 'square', 0.008, 0.04);
+        }
+
+        function playChestOpen() {
+            playTone(660, 0.12, 'square', 0.03);
+            playTone(440, 0.16, 'triangle', 0.02, 0.05);
+        }
+
+        function playBobbyAttack() {
+            const now = performance.now();
+            if (now - lastBobbySoundTime < 650) return;
+            lastBobbySoundTime = now;
+            playTone(120, 0.2, 'sawtooth', 0.025);
+            playTone(80, 0.18, 'square', 0.015, 0.04);
+        }
+
+        function playNuke() {
+            playTone(110, 0.18, 'sawtooth', 0.035);
+            playTone(220, 0.16, 'square', 0.025, 0.06);
+            playTone(55, 0.24, 'triangle', 0.02, 0.12);
+        }
+
+        function playGameOver() {
+            playTone(180, 0.15, 'sawtooth', 0.03);
+            playTone(120, 0.25, 'square', 0.025, 0.08);
+            playTone(90, 0.35, 'triangle', 0.018, 0.16);
+        }
+
+        function playVictory() {
+            playTone(523.25, 0.14, 'triangle', 0.025);
+            playTone(659.25, 0.14, 'triangle', 0.025, 0.08);
+            playTone(783.99, 0.2, 'triangle', 0.03, 0.16);
+        }
+
+        function setupMobileControls() {
+            document.querySelectorAll('.control-btn, .action-btn').forEach((button) => {
+                const action = button.getAttribute('data-dir') || button.getAttribute('data-action');
+                const setState = (value) => {
+                    if (action === 'up') moveForward = value;
+                    else if (action === 'down') moveBackward = value;
+                    else if (action === 'left') moveLeft = value;
+                    else if (action === 'right') moveRight = value;
+                    else if (action === 'interact' && value) tryOpenChest();
+                };
+
+                const begin = (event) => {
+                    event.preventDefault();
+                    startGame();
+                    setState(true);
+                };
+                const end = (event) => {
+                    event.preventDefault();
+                    setState(false);
+                };
+
+                button.addEventListener('touchstart', begin, { passive: false });
+                button.addEventListener('touchend', end);
+                button.addEventListener('touchcancel', end);
+                button.addEventListener('mousedown', begin);
+                button.addEventListener('mouseup', end);
+                button.addEventListener('mouseleave', end);
+                button.addEventListener('pointerdown', begin);
+                button.addEventListener('pointerup', end);
+                button.addEventListener('pointerleave', end);
+            });
+        }
+
+        function updateMobileControlsVisibility() {
+            if (isMobile) {
+                mobileControls.style.display = isStarted && !isGameOver && !isNuking ? 'flex' : 'none';
+            } else {
+                mobileControls.style.display = 'none';
+            }
+        }
+
+        function startGame() {
+            if (isStarted || isGameOver || isNuking) return;
+            isStarted = true;
+            updateMobileControlsVisibility();
+            const ctx = ensureAudio();
+            if (ctx && ctx.state === 'suspended') ctx.resume();
+            if (!isMobile) {
+                canvasContainer.requestPointerLock();
+            }
+            instructions.style.display = 'none';
+        }
+
+        function onTouchStart(event) {
+            if (!isMobile || !isStarted || isGameOver || isNuking) return;
+            if (event.touches.length !== 1) return;
+            const touch = event.touches[0];
+            touchLookActive = true;
+            touchStartX = touch.clientX;
+            touchStartY = touch.clientY;
+            lastTouchX = touch.clientX;
+            lastTouchY = touch.clientY;
+            event.preventDefault();
+        }
+
+        function onTouchMove(event) {
+            if (!touchLookActive || !isMobile || !isStarted || isGameOver || isNuking) return;
+            const touch = event.touches[0];
+            const dx = touch.clientX - lastTouchX;
+            const dy = touch.clientY - lastTouchY;
+            cameraRotation.y -= dx * 0.005;
+            cameraRotation.x -= dy * 0.005;
+            cameraRotation.x = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, cameraRotation.x));
+            camera.quaternion.setFromEuler(new THREE.Euler(cameraRotation.x, cameraRotation.y, 0, 'YXZ'));
+            lastTouchX = touch.clientX;
+            lastTouchY = touch.clientY;
+            event.preventDefault();
+        }
+
+        function onTouchEnd() {
+            touchLookActive = false;
+        }
+
         function onMouseMove(event) {
             if (document.pointerLockElement !== canvasContainer) return;
             cameraRotation.y -= (event.movementX || 0) * 0.002;
@@ -431,6 +713,7 @@
         function tryOpenChest() {
             if (activeChest && !activeChest.userData.opened) {
                 activeChest.userData.opened = true;
+                playChestOpen();
                 
                 activeChest.children[0].scale.y = 0.5; 
                 activeChest.children[0].position.y = 0.2; 
@@ -446,6 +729,7 @@
 
         function triggerNukeEvent() {
             isNuking = true;
+            playNuke();
             document.exitPointerLock();
             alertUI.style.color = "red";
             alertUI.style.fontSize = "1.5rem";
@@ -503,6 +787,7 @@
             const distance = bobby.position.distanceTo(playerPos);
             if (distance < bobbyAttackRange) {
                 sanity -= delta * 55; 
+                playBobbyAttack();
                 ambientLight.color.setHex(0xffaaaa);
                 
                 if (!alertUI.innerText) {
@@ -535,6 +820,7 @@
             }
 
             if (isGameOver) return;
+            if (!isStarted) return;
 
             handleMovement(delta);
             handleSurvivalCycle(delta);
@@ -558,10 +844,27 @@
             if (moveForward || moveBackward) velocity.z -= moveDirection.z * 100.0 * delta;
             if (moveLeft || moveRight) velocity.x += moveDirection.x * 100.0 * delta;
 
+            if (moveForward || moveBackward || moveLeft || moveRight) {
+                playFootstep();
+            }
+
             camera.position.addScaledVector(velocity, delta);
 
             camera.position.x = Math.max(-175, Math.min(175, camera.position.x));
             camera.position.z = Math.max(-175, Math.min(175, camera.position.z));
+
+            for (const tree of treeObjects) {
+                const dx = camera.position.x - tree.position.x;
+                const dz = camera.position.z - tree.position.z;
+                const distance = Math.sqrt(dx * dx + dz * dz);
+                const minDistance = 2.4 + tree.userData.radius;
+
+                if (distance < minDistance) {
+                    const pushFactor = (minDistance - distance) / Math.max(distance, 0.0001);
+                    camera.position.x += dx * pushFactor;
+                    camera.position.z += dz * pushFactor;
+                }
+            }
         }
 
         function handleSurvivalCycle(delta) {
@@ -593,6 +896,7 @@
 
             if (sanity <= 0) {
                 isGameOver = true;
+                playGameOver();
                 document.exitPointerLock();
                 document.getElementById('game-over').style.display = 'flex';
             }
@@ -614,6 +918,7 @@
                 flashOverlay.style.opacity = (nukeTimer - 3) / 1.5;
             } 
             else {
+                playVictory();
                 document.getElementById('victory').style.display = 'flex';
             }
         }
